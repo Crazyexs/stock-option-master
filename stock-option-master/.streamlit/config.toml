@@ -1,0 +1,11 @@
+# Bloomberg-Terminal global theme (applies to every page, incl. app.py).
+[theme]
+base = "dark"
+primaryColor = "#FF7A00"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#0E0E0E"
+textColor = "#FFB000"
+font = "monospace"
+
+[server]
+runOnSave = true
