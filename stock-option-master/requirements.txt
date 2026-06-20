@@ -10,3 +10,4 @@ optionlab
 arch
 pytz
 plotly
+deep-translator

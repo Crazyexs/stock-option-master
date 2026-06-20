@@ -34,6 +34,7 @@ FUNCTIONS = [
     ("OI",   "pages/10_Open_Interest.py",    "Open interest / volume"),
     ("CHT",  "pages/11_Contract_Chart.py",   "Price candles + GEX overlay"),
     ("N",    "pages/12_Macro_News.py",        "Events calendar + headlines"),
+    ("FA",   "pages/13_Fundamental_Analysis.py", "Stock fundamentals: DCF, multiples, scores"),
 ]
 with right:
     st.markdown("### FUNCTIONS  ·  click <GO>")
