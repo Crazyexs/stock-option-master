@@ -103,6 +103,142 @@ def language_selector(label: str | None = None):
         st.rerun()
 
 
+def sidebar_language_selector():
+    """
+    Compact EN/TH translate toggle rendered in the sidebar on EVERY page (called
+    from theme.apply). Flips st.session_state['lang'] and reruns; the auto-translate
+    layer below then machine-translates the whole page on the fly when TH is active.
+    """
+    try:
+        current = get_lang()
+        with st.sidebar:
+            choice = st.radio("LANGUAGE / ภาษา", ["EN", "TH"],
+                              index=0 if current == "EN" else 1,
+                              horizontal=True, key="i18n_lang_global",
+                              help="Translate every page to Thai (machine translation, "
+                                   "best-effort). Switch back to EN any time.")
+        if choice != current:
+            set_lang(choice)
+            st.rerun()
+    except Exception:
+        pass
+
+
+# ── Whole-page auto-translation (install once; self-gates per session) ─────────
+# When the user picks TH, we machine-translate the text of every Streamlit widget
+# on the fly so we never have to hand-translate 14 pages. We wrap the relevant
+# DeltaGenerator methods (so column / sidebar / container calls like
+# `col.metric(...)` are covered too — not just module-level `st.*`). The wrapper
+# checks the language at CALL time, so it is safe when several users with
+# different languages share one Streamlit server process.
+
+import threading as _threading
+_guard = _threading.local()
+
+# Methods whose first string arg (and selected text kwargs) is user-facing copy.
+_WRAP_NAMES = (
+    "title", "header", "subheader", "markdown", "caption", "text", "write",
+    "info", "warning", "error", "success", "metric", "button", "download_button",
+    "checkbox", "toggle", "radio", "selectbox", "multiselect", "select_slider",
+    "slider", "text_input", "number_input", "text_area", "expander", "tabs",
+    "page_link", "progress",
+)
+_TXT_KWARGS = ("body", "label", "text", "help", "caption", "title")
+# Interactive widgets: translating the label can collide two English labels into
+# one Thai string → Streamlit DuplicateWidgetID. For keyless ones we inject a key
+# derived from the ORIGINAL English label (already unique, since the app runs in EN).
+_WIDGET_NAMES = {"button", "download_button", "checkbox", "toggle", "radio",
+                 "selectbox", "multiselect", "select_slider", "slider",
+                 "text_input", "number_input", "text_area"}
+
+
+def _xlate(s: str) -> str:
+    if not isinstance(s, str) or not s.strip():
+        return s
+    if s.lstrip().startswith("<"):          # raw HTML — never translate
+        return s
+    try:
+        return translate_text(s, "th")
+    except Exception:
+        return s
+
+
+def _apply_translation(args: tuple, kwargs: dict, fname: str, base: int):
+    """`base` skips the leading `self` when wrapping DeltaGenerator class methods."""
+    if kwargs.get("unsafe_allow_html"):     # CSS / HTML blocks (tape, tables)
+        return args, kwargs
+    args = list(args)
+    # Capture the ORIGINAL English label (positional first, else kwarg) before we
+    # translate it — used to key keyless interactive widgets.
+    orig_label = None
+    if fname not in ("page_link", "tabs"):
+        if len(args) > base and isinstance(args[base], str):
+            orig_label = args[base]
+        elif isinstance(kwargs.get("label"), str):
+            orig_label = kwargs["label"]
+    if fname in _WIDGET_NAMES and orig_label and "key" not in kwargs:
+        kwargs["key"] = "i18n_%s_%s" % (fname, orig_label)
+
+    if fname == "tabs" and len(args) > base and isinstance(args[base], (list, tuple)):
+        args[base] = [_xlate(x) if isinstance(x, str) else x for x in args[base]]
+    elif fname == "page_link":
+        pass                                # first positional is a path/target, never text
+    elif len(args) > base and isinstance(args[base], str):
+        args[base] = _xlate(args[base])
+    for k in _TXT_KWARGS:
+        if k in kwargs and isinstance(kwargs[k], str):
+            kwargs[k] = _xlate(kwargs[k])
+    return tuple(args), kwargs
+
+
+def _wrap(func, fname: str, self_arg: bool):
+    if getattr(func, "_i18n_wrapped", False):
+        return func
+    base = 1 if self_arg else 0     # class methods receive `self` as args[0]
+
+    def inner(*args, **kwargs):
+        # English → passthrough. Re-entrant Streamlit calls → translate once only.
+        if get_lang() != "TH" or getattr(_guard, "busy", False):
+            return func(*args, **kwargs)
+        _guard.busy = True
+        try:
+            try:
+                args, kwargs = _apply_translation(args, kwargs, fname, base)
+            except Exception:
+                pass
+            return func(*args, **kwargs)
+        finally:
+            _guard.busy = False
+
+    inner._i18n_wrapped = True
+    return inner
+
+
+def install_autotranslate():
+    """Idempotently wrap Streamlit's text/widget methods for on-the-fly TH output."""
+    if getattr(st, "_i18n_installed", False):
+        return
+    # Wrap the DeltaGenerator class so column/sidebar/container calls (col.metric,
+    # st.sidebar.markdown, …) are covered — these pass `self` as the first arg.
+    try:
+        from streamlit.delta_generator import DeltaGenerator
+        for name in _WRAP_NAMES:
+            f = getattr(DeltaGenerator, name, None)
+            if callable(f):
+                setattr(DeltaGenerator, name, _wrap(f, name, self_arg=True))
+    except Exception:
+        pass
+    # Wrap the module-level st.* aliases too (already bound — no `self` in args).
+    for name in _WRAP_NAMES:
+        g = getattr(st, name, None)
+        if callable(g) and not getattr(g, "_i18n_wrapped", False):
+            try:
+                setattr(st, name, _wrap(g, name, self_arg=False))
+            except Exception:
+                pass
+    st._i18n_installed = True
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def _translate_cached(text: str, target: str) -> str:
     try:

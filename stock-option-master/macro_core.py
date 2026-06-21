@@ -182,11 +182,16 @@ def cross_asset_tilt(returns: pd.DataFrame, window: int = 60) -> dict:
         common = s.index.intersection(nq.index)
         if len(common) < 20:
             continue
-        corr = float(np.corrcoef(s.loc[common], nq.loc[common])[0, 1])
+        s_common = s.loc[common]
+        corr = float(np.corrcoef(s_common, nq.loc[common])[0, 1])
         if math.isnan(corr):
             continue
-        sd = float(s.std())
-        last = float(s.iloc[-1])
+        sd = float(s_common.std())
+        # "Latest move" must be CONTEMPORANEOUS with NQ — assets trade on
+        # different calendars (BTC weekends; a stale ticker's last bar can be
+        # days old), so use the most recent bar this asset SHARES with NQ, not
+        # its own iloc[-1] (which would mix non-aligned days into the tilt).
+        last = float(s_common.iloc[-1])
         z = max(-3.0, min(3.0, last / sd)) if sd > 0 else 0.0
         comps.append({"asset": col, "corr": round(corr, 2),
                       "move_pct": round(last * 100, 2), "z_move": round(z, 2),
@@ -212,6 +217,7 @@ def compute_nq_bias(period: str = "6mo") -> dict:
     tilt = cross_asset_tilt(returns)
     corr = correlation_matrix(returns)
     ev = event_risk()
+    news = news_pulse()
     try:
         gex = gx.compute_symbol("NQ")
     except Exception as exc:
@@ -238,6 +244,13 @@ def compute_nq_bias(period: str = "6mo") -> dict:
         raw_conf *= 0.7                            # pin caps directional moves
     elif regime_pos is False:
         raw_conf *= 1.15                           # trend lets the tilt run
+    # A hot tape (fresh HIGH-impact headlines) breaks gamma pins the same way a
+    # scheduled event does — a daily cross-asset tilt can't see a breaking shock,
+    # so damp directional confidence until price confirms the new regime.
+    if news.get("level") == "elevated":
+        raw_conf *= 0.5
+    elif news.get("level") == "watch":
+        raw_conf *= 0.8
     conf_pct = max(0.0, min(1.0, raw_conf)) * 100.0
     confidence = "high" if conf_pct >= 66 else ("medium" if conf_pct >= 33 else "low")
 
@@ -249,6 +262,12 @@ def compute_nq_bias(period: str = "6mo") -> dict:
         bias = "NEUTRAL"
 
     play = _build_play(bias, regime_pos, ev, gex)
+    if news.get("level") == "elevated":
+        cats = ", ".join(news.get("categories", [])) or "breaking headlines"
+        play.insert(0, f" Tape HOT ({news.get('n_recent_high',0)} HIGH-impact items, "
+                       f"lean {news.get('tone','mixed')} — {cats}): a breaking shock can "
+                       "break gamma pins — confidence is damped; wait for price to confirm "
+                       "the new regime before sizing.")
 
     out.update({
         "p_up": p_up,
@@ -262,10 +281,28 @@ def compute_nq_bias(period: str = "6mo") -> dict:
         "regime": regime_txt,
         "regime_pos": regime_pos,
         "event": ev,
+        "news": news,
         "gex": gex,
         "play": play,
     })
     return out
+
+
+def news_pulse() -> dict:
+    """
+    Best-effort read of the live tape's market-impact heat, used to damp the NQ
+    directional confidence on breaking shocks. Never raises; if news_core or the
+    feeds are unavailable, returns a calm/neutral pulse so the model is unaffected.
+    """
+    try:
+        import news_core as nc
+        # FinancialJuice only — fast + reliable. The model must not block on the
+        # flaky Nitter retry loop (that feed lives on the Macro News page).
+        items = nc.get_headlines(sources=["FinancialJuice"], min_impact="LOW", limit=60)
+        return nc.market_impact_summary(items)
+    except Exception:
+        return {"level": "calm", "n_high": 0, "n_recent_high": 0,
+                "tone": "mixed", "categories": []}
 
 
 def _build_play(bias: str, regime_pos, ev: dict, gex: dict) -> list[str]:

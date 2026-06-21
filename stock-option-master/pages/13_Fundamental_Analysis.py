@@ -13,11 +13,8 @@ except Exception:
     _HAS_PLOTLY = False
 
 st.set_page_config(page_title="Fundamental Analysis", layout="wide")
-theme.apply()
+theme.apply()   # renders the global LANGUAGE / ภาษา toggle in the sidebar
 
-top = st.columns([3, 1])
-with top[1]:
-    i18n.language_selector()
 T = i18n.t
 
 st.title(T("fundamental_title"))

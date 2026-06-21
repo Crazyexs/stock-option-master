@@ -55,6 +55,22 @@ if ev.get("event"):
     if up:
         st.caption("Upcoming: " + " · ".join(f"{d} {n}" for d, n in up))
 
+# ── News-pulse banner (feeds the confidence damper) ─────────────────────────────
+news = res.get("news", {})
+if news:
+    lvl = news.get("level", "calm")
+    nmsg = (f"**Live tape:** {news.get('n_high',0)} HIGH-impact items "
+            f"({news.get('n_recent_high',0)} in last hour) · lean **{news.get('tone','mixed')}**")
+    if news.get("categories"):
+        nmsg += " · " + ", ".join(news["categories"])
+    if lvl == "elevated":
+        st.error(" " + nmsg + "  ·  **tape HOT — confidence damped, pins can break.**")
+    elif lvl == "watch":
+        st.warning(" " + nmsg + "  ·  watch — confidence trimmed.")
+    else:
+        st.info(" " + nmsg + "  ·  calm.")
+    st.caption("Impact-rated headlines on the  Macro News page (FinancialJuice + Walter Bloomberg).")
+
 # ── Headline bias ─────────────────────────────────────────────────────────────
 p_up = res.get("p_up", 50.0)
 bias = res.get("bias", "NEUTRAL")

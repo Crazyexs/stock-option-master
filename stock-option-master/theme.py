@@ -51,24 +51,59 @@ a, a:visited { color:#FFD27A !important; }
 /* Sidebar */
 [data-testid="stSidebar"] { background:#080808 !important; border-right:1px solid #FF7A00; }
 [data-testid="stSidebar"] * { color:#FFB000 !important; }
-/* Metrics */
+/* Metrics — bigger, clearer value, subtle hover lift for scannability */
 [data-testid="stMetric"] { background:#0E0E0E; border:1px solid #2a1a00; border-left:3px solid #FF7A00;
-    padding:8px 10px; border-radius:2px; }
-[data-testid="stMetricValue"] { color:#FFB000 !important; font-family:'Consolas',monospace !important; }
-[data-testid="stMetricLabel"] { color:#8A8A8A !important; text-transform:uppercase; font-size:11px; }
+    padding:10px 12px; border-radius:3px; transition:border-color .12s ease, transform .12s ease; }
+[data-testid="stMetric"]:hover { border-color:#FF7A00; transform:translateY(-1px); }
+[data-testid="stMetricValue"] { color:#FFB000 !important; font-family:'Consolas',monospace !important;
+    font-size:1.55rem !important; font-weight:700; letter-spacing:0.3px; }
+[data-testid="stMetricLabel"] { color:#9a9a9a !important; text-transform:uppercase; font-size:11px;
+    letter-spacing:0.4px; }
+[data-testid="stMetricDelta"] { font-family:'Consolas',monospace !important; }
 /* Buttons */
 .stButton button, .stDownloadButton button {
     background:#1a0e00 !important; color:#FF7A00 !important; border:1px solid #FF7A00 !important;
-    border-radius:2px !important; font-family:'Consolas',monospace !important; text-transform:uppercase; }
+    border-radius:2px !important; font-family:'Consolas',monospace !important; text-transform:uppercase;
+    transition:background .12s ease, color .12s ease; }
 .stButton button:hover { background:#FF7A00 !important; color:#000 !important; }
-/* Tables */
+.stButton button[kind="primary"] { background:#FF7A00 !important; color:#000 !important; font-weight:700; }
+.stButton button[kind="primary"]:hover { background:#FFB000 !important; }
+/* Tables / dataframe — framed, monospace, comfortable rows */
 [data-testid="stDataFrame"], [data-testid="stTable"] { background:#050505 !important;
-    border:1px solid #2a1a00; font-family:'Consolas',monospace !important; }
+    border:1px solid #2a1a00; border-radius:3px; font-family:'Consolas',monospace !important; }
+[data-testid="stTable"] table { font-size:13px; }
+[data-testid="stTable"] tbody tr:nth-child(odd) td { background:#0A0A0A; }
+[data-testid="stTable"] tbody tr:hover td { background:#1a0e00; }
+[data-testid="stTable"] td, [data-testid="stTable"] th { border-color:#1a1a1a !important; padding:5px 10px; }
+/* Tabs — clear active state */
+.stTabs [data-baseweb="tab-list"] { border-bottom:1px solid #2a1a00; gap:2px; }
+.stTabs [data-baseweb="tab"] { color:#9a9a9a !important; font-family:'Consolas',monospace !important;
+    text-transform:uppercase; letter-spacing:0.4px; }
+.stTabs [aria-selected="true"] { color:#FF7A00 !important; border-bottom:2px solid #FF7A00 !important; }
+/* Expander */
+[data-testid="stExpander"] { border:1px solid #2a1a00 !important; border-radius:3px; background:#080808; }
+[data-testid="stExpander"] summary { color:#FF7A00 !important; text-transform:uppercase; font-size:12px; }
+/* Alerts — terminal-coloured left borders for fast triage */
+[data-testid="stAlert"] { border-radius:3px; font-family:'Consolas',monospace !important; }
 /* Inputs */
-.stSelectbox div, .stTextInput input, .stRadio label, .stToggle label { color:#FFB000 !important; }
+.stSelectbox div, .stTextInput input, .stNumberInput input, .stRadio label,
+.stToggle label, .stMultiSelect label { color:#FFB000 !important; }
+.stTextInput input:focus, .stNumberInput input:focus { border-color:#FF7A00 !important; }
+[data-testid="stWidgetLabel"] p { color:#9a9a9a !important; text-transform:uppercase; font-size:11px;
+    letter-spacing:0.3px; }
+/* Code block (algo / pipe strings) */
+[data-testid="stCode"], pre { border:1px solid #2a1a00 !important; border-radius:3px; }
+code { color:#FFD27A !important; }
 /* Dividers / captions */
 hr { border-color:#2a1a00 !important; }
 [data-testid="stCaptionContainer"], .stCaption { color:#8A8A8A !important; }
+/* Scrollbars */
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:#080808; }
+::-webkit-scrollbar-thumb { background:#2a1a00; border-radius:5px; }
+::-webkit-scrollbar-thumb:hover { background:#FF7A00; }
+/* Tooltips a touch more legible */
+[data-testid="stTooltipContent"] { font-family:'Consolas',monospace !important; font-size:12px; }
 
 /* Live ticker tape */
 .bbg-tape { width:100%; overflow:hidden; background:#0A0A0A; border-top:1px solid #FF7A00;
@@ -159,7 +194,14 @@ def style_fig(fig):
 
 
 def apply(header: bool = True):
-    """Inject CSS + (optionally) the live ticker tape. Call after set_page_config."""
+    """Inject CSS + language toggle + auto-translate + tape. Call after set_page_config."""
     st.markdown(_CSS, unsafe_allow_html=True)
+    # Whole-app translate button (sidebar) + on-the-fly TH translation layer.
+    try:
+        import i18n
+        i18n.install_autotranslate()
+        i18n.sidebar_language_selector()
+    except Exception:
+        pass
     if header:
         render_tape()
