@@ -159,6 +159,87 @@ def classify_impact(title: str) -> dict:
     return {"impact": impact, "score": score, "categories": cats, "tone": tone}
 
 
+# ── Single-stock (equity) news classifier ────────────────────────────────────
+# Macro `classify_impact` is wrong for single names; a stock cares about earnings,
+# guidance, ratings, M&A, legal/regulatory, management — and whether each is GOOD
+# or BAD for the share price. This rates impact AND direction for one ticker.
+_EQ_GOOD = (
+    r"\bbeat", r"\btops?\b", r"\braises? (?:guidance|outlook|forecast|dividend|target)",
+    r"\brecord\b", r"\bupgrade", r"\bbuyback", r"\bbuy[- ]?back", r"\bsurge", r"\bsoar",
+    r"\bjump", r"\brally", r"\bwins?\b", r"\bcontract win", r"\bapprov", r"\boutperform",
+    r"\boverweight\b", r"\bstrong (?:demand|results|quarter|sales|growth)", r"\bhikes? dividend",
+    r"\bprice target (?:raise|hike|increase)", r"\bexpands?\b", r"\bpartnership\b", r"\bupbeat\b",
+)
+_EQ_BAD = (
+    r"\bmiss", r"\bcuts? (?:guidance|outlook|forecast|dividend|jobs|target)", r"\bdowngrade",
+    r"\blawsuit\b", r"\bsued?\b", r"\b(?:sec|doj|ftc)\b", r"\binvestigation\b", r"\bprobe\b",
+    r"\brecall", r"\blayoff", r"\bjob cuts\b", r"\bplunge", r"\bplummet", r"\bcrash", r"\bslump",
+    r"\bsinks?\b", r"\bfalls?\b", r"\bdrops?\b", r"\bwarns?\b", r"\bprofit warning\b",
+    r"\bdelays?\b", r"\bhalt", r"\bbankrupt", r"\bfraud\b", r"\bshort[- ]seller\b", r"\bresign",
+    r"\bsteps down\b", r"\bunderperform", r"\bunderweight\b", r"\bdownbeat\b",
+    r"\bweak (?:demand|guidance|results|sales)", r"\bslash", r"\bprice target cut", r"\bglitch\b",
+)
+_EQ_HIGH = (
+    r"\bearnings\b", r"\bguidance\b", r"\bdowngrade", r"\bupgrade", r"\bmerger\b", r"\bacqui",
+    r"\btakeover\b", r"\bbuyout\b", r"\blawsuit\b", r"\b(?:sec|doj|ftc)\b", r"\binvestigation\b",
+    r"\bfda\b", r"\brecall", r"\bceo\b", r"\bcfo\b", r"\bbankrupt", r"\bbuyback", r"\bstock split\b",
+    r"\bprofit warning\b", r"\bdividend\b", r"\bquarterly results\b", r"\bq[1-4]\b", r"\bbeat",
+    r"\bmiss", r"\bguides?\b",
+)
+
+
+def classify_equity_news(title: str) -> dict:
+    """Rate one single-stock headline: impact HIGH/MEDIUM/LOW + sentiment good/bad/neutral."""
+    t = (title or "").lower()
+    good = sum(1 for p in _EQ_GOOD if re.search(p, t))
+    bad = sum(1 for p in _EQ_BAD if re.search(p, t))
+    high = sum(1 for p in _EQ_HIGH if re.search(p, t))
+    sentiment = "good" if good > bad else ("bad" if bad > good else "neutral")
+    if high >= 2 or (good + bad) >= 2:
+        impact = "HIGH"
+    elif high >= 1 or (good + bad) >= 1:
+        impact = "MEDIUM"
+    else:
+        impact = "LOW"
+    return {"impact": impact, "sentiment": sentiment, "good": good, "bad": bad}
+
+
+def get_equity_news(ticker: str, limit: int = 25) -> list[dict]:
+    """Yahoo news for one ticker, classified + newest-first, with an age in minutes."""
+    items = fetch_yf_ticker_news(ticker)
+    for it in items:
+        it.update(classify_equity_news(it.get("title", "")))
+    now = datetime.now(timezone.utc)
+    for it in items:
+        pub = it.get("published")
+        it["age_min"] = (now - pub).total_seconds() / 60.0 if pub else None
+    items.sort(key=lambda it: it.get("published") or datetime.min.replace(tzinfo=timezone.utc),
+               reverse=True)
+    return items[:limit]
+
+
+def equity_news_summary(items: list[dict]) -> dict:
+    """Net tone of a ticker's headlines, weighting HIGH-impact items more."""
+    score = 0.0
+    n_high = 0
+    for it in items:
+        w = {"HIGH": 2.0, "MEDIUM": 1.0, "LOW": 0.4}.get(it.get("impact"), 0.4)
+        if it.get("impact") == "HIGH":
+            n_high += 1
+        if it.get("sentiment") == "good":
+            score += w
+        elif it.get("sentiment") == "bad":
+            score -= w
+    if score > 1.0:
+        tone, color = "positive", "good"
+    elif score < -1.0:
+        tone, color = "negative", "bad"
+    else:
+        tone, color = "mixed", "warn"
+    return {"tone": tone, "color": color, "score": round(score, 1),
+            "n": len(items), "n_high": n_high}
+
+
 # ── RSS / Atom parsing (stdlib only — no feedparser dependency) ────────────────
 def _strip_tag(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()   # drop XML namespace

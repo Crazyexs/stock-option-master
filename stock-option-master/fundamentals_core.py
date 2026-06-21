@@ -252,3 +252,194 @@ def _safe_stmt(ticker, attr):
         return df if df is not None and not df.empty else None
     except Exception:
         return None
+
+
+# ── Verdict / scoring ─────────────────────────────────────────────────────────
+# Turns the raw numbers into the three plain-English reads a user actually wants:
+#   1. Is it cheap or expensive? (valuation vs DCF + analyst targets)
+#   2. Are the financials good? (margins, returns, solvency, leverage, cash)
+#   3. How is it performing? (revenue / earnings growth)
+# Each is a transparent, weighted heuristic — NOT advice. Thresholds are coarse
+# and sector-agnostic, so treat the labels as a starting point, not a signal.
+def _pct(a, b):
+    return ((a - b) / b * 100.0) if (a is not None and b not in (None, 0)) else None
+
+
+def _clamp(x, lo=0.0, hi=1.0):
+    return max(lo, min(hi, x))
+
+
+def _sub(v, good, ok, higher_better=True):
+    """Map a metric to a 0/0.6/1.0 sub-score against two thresholds."""
+    if v is None:
+        return None
+    if higher_better:
+        return 1.0 if v >= good else (0.6 if v >= ok else 0.2)
+    return 1.0 if v <= good else (0.6 if v <= ok else 0.2)
+
+
+def verdict(res: dict) -> dict:
+    """Plain-English valuation / health / performance read from an analyze() dict."""
+    if not res or res.get("error"):
+        return {}
+    price = res.get("price")
+    base = (res.get("dcf") or {}).get("base") or {}
+    tg = res.get("targets") or {}
+    prof = res.get("profitability") or {}
+    mult = res.get("multiples") or {}
+    capm = res.get("capm") or {}
+    z = res.get("altman") or {}
+    fcf = res.get("fcf")
+    mcap = res.get("market_cap")
+    net_debt = res.get("net_debt")
+    income = res.get("income_stmt")
+
+    strengths: list[str] = []
+    risks: list[str] = []
+
+    # ── 1. Valuation ──
+    up_dcf = _pct(base.get("per_share"), price)
+    up_an = _pct(tg.get("mean"), price)
+    ups = [u for u in (up_dcf, up_an) if u is not None]
+    val_up = sum(ups) / len(ups) if ups else None
+    if val_up is None:
+        val_label, val_color = "n/a", "warn"
+    elif val_up >= 20:
+        val_label, val_color = "Undervalued", "good"
+    elif val_up <= -10:
+        val_label, val_color = "Overvalued", "bad"
+    else:
+        val_label, val_color = "Fairly valued", "warn"
+    if up_dcf is not None:
+        (strengths if up_dcf > 0 else risks).append(
+            f"DCF base value is {abs(up_dcf):.0f}% {'above' if up_dcf > 0 else 'below'} the current price")
+    if up_an is not None:
+        (strengths if up_an > 0 else risks).append(
+            f"Analyst mean target is {abs(up_an):.0f}% {'above' if up_an > 0 else 'below'} the price")
+    peg = mult.get("PEG")
+    if peg is not None:
+        if peg < 1:
+            strengths.append(f"PEG {peg:.2f} — cheap relative to its growth")
+        elif peg > 2.5:
+            risks.append(f"PEG {peg:.2f} — expensive relative to its growth")
+    pe = mult.get("P/E")
+    if pe is not None and pe > 40:
+        risks.append(f"High P/E {pe:.0f} — priced for strong growth")
+
+    # ── 2. Financial health ── (weight, sub-score)
+    subs: list[tuple[float, float]] = []
+    nm = prof.get("net_margin")
+    s = _sub(nm, 0.15, 0.05)
+    if s is not None:
+        subs.append((1.0, s))
+        if nm >= 0.15:
+            strengths.append(f"Fat net margin {nm * 100:.0f}%")
+        elif nm < 0:
+            risks.append("Unprofitable — negative net margin")
+    roe = prof.get("roe")
+    s = _sub(roe, 0.15, 0.08)
+    if s is not None:
+        subs.append((1.0, s))
+        if roe >= 0.15:
+            strengths.append(f"Strong ROE {roe * 100:.0f}%")
+        elif roe < 0:
+            risks.append("Negative ROE")
+    roic, wacc = prof.get("roic"), capm.get("wacc")
+    if roic is not None and wacc:
+        if roic > wacc + 0.02:
+            subs.append((1.2, 1.0))
+            strengths.append(f"ROIC {roic * 100:.0f}% beats WACC {wacc * 100:.0f}% — creating value")
+        elif roic > wacc:
+            subs.append((1.2, 0.6))
+        else:
+            subs.append((1.2, 0.2))
+            risks.append(f"ROIC {roic * 100:.0f}% below WACC {wacc * 100:.0f}% — destroying value")
+    if z.get("zone"):
+        subs.append((1.0, {"Safe": 1.0, "Grey": 0.6, "Distress": 0.1}.get(z["zone"], 0.5)))
+        if z["zone"] == "Safe":
+            strengths.append(f"Altman Z {z['z']:.1f} — bankruptcy-safe")
+        elif z["zone"] == "Distress":
+            risks.append(f"Altman Z {z['z']:.1f} — financial-distress zone")
+    if fcf is not None:
+        if fcf > 0:
+            subs.append((1.0, 1.0))
+            strengths.append("Generates positive free cash flow")
+        else:
+            subs.append((1.0, 0.2))
+            risks.append("Burning cash — negative free cash flow")
+    if net_debt is not None and mcap:
+        lev = net_debt / mcap
+        if lev <= 0:
+            subs.append((0.8, 1.0))
+            strengths.append("Net-cash balance sheet (more cash than debt)")
+        elif lev <= 0.3:
+            subs.append((0.8, 0.6))
+        else:
+            subs.append((0.8, 0.2))
+            risks.append(f"High leverage — net debt is {lev * 100:.0f}% of market cap")
+
+    # ── 3. Performance (growth from statements) ──
+    rev = _row(income, "Total Revenue", "Operating Revenue")
+    ni = _row(income, "Net Income", "Net Income Common Stockholders")
+    rev_g = ni_g = None
+    if rev is not None and len(rev) >= 2 and rev.iloc[1]:
+        rev_g = rev.iloc[0] / rev.iloc[1] - 1
+        s = _sub(rev_g, 0.12, 0.02)
+        if s is not None:
+            subs.append((1.0, s))
+        (strengths if rev_g >= 0.02 else risks).append(
+            f"Revenue {'grew' if rev_g >= 0 else 'fell'} {abs(rev_g) * 100:.0f}% year-over-year")
+    if ni is not None and len(ni) >= 2 and ni.iloc[1] and ni.iloc[1] > 0:
+        ni_g = ni.iloc[0] / ni.iloc[1] - 1
+        (strengths if ni_g >= 0 else risks).append(
+            f"Net income {'grew' if ni_g >= 0 else 'fell'} {abs(ni_g) * 100:.0f}% year-over-year")
+
+    health_score = (sum(w * sc for w, sc in subs) / sum(w for w, _ in subs)) if subs else None
+    if health_score is None:
+        health_label, health_color = "n/a", "warn"
+    elif health_score >= 0.7:
+        health_label, health_color = "Strong", "good"
+    elif health_score >= 0.45:
+        health_label, health_color = "Adequate", "warn"
+    else:
+        health_label, health_color = "Weak", "bad"
+
+    # ── Overall blend (valuation + health + analyst stance) ──
+    reco = (tg.get("reco") or "").lower()
+    reco_score = {"strong_buy": 1.0, "buy": 0.8, "outperform": 0.8, "hold": 0.5,
+                  "neutral": 0.5, "underperform": 0.25, "sell": 0.1,
+                  "strong_sell": 0.0}.get(reco)
+    val_score = _clamp(0.5 + val_up / 100.0) if val_up is not None else None
+    parts = []
+    if val_score is not None:
+        parts.append((2.0, val_score))
+    if health_score is not None:
+        parts.append((2.0, health_score))
+    if reco_score is not None:
+        parts.append((1.0, reco_score))
+    overall = (sum(w * s for w, s in parts) / sum(w for w, _ in parts)) if parts else 0.5
+    score100 = int(round(overall * 100))
+    if score100 >= 70:
+        o_label, o_color = "Attractive", "good"
+    elif score100 >= 45:
+        o_label, o_color = "Mixed / fair", "warn"
+    else:
+        o_label, o_color = "Caution", "bad"
+
+    name = res.get("name", res.get("symbol"))
+    summary = (f"**{name}** looks **{o_label.lower()}**. Valuation: **{val_label.lower()}**"
+               + (f" ({val_up:+.0f}% to estimated fair value)" if val_up is not None else "")
+               + f". Financial health: **{health_label.lower()}**"
+               + (f" ({int(health_score * 100)}/100)" if health_score is not None else "")
+               + "."
+               + (f" Analysts lean **{reco.replace('_', ' ')}**." if reco else ""))
+
+    return {
+        "overall": {"label": o_label, "color": o_color, "score": score100, "summary": summary},
+        "valuation": {"label": val_label, "color": val_color, "upside": val_up,
+                      "up_dcf": up_dcf, "up_analyst": up_an},
+        "health": {"label": health_label, "color": health_color,
+                   "score": int(health_score * 100) if health_score is not None else None},
+        "performance": {"rev_growth": rev_g, "ni_growth": ni_g},
+        "strengths": strengths, "risks": risks, "reco": reco,
+    }

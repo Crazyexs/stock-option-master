@@ -1,8 +1,9 @@
-"""Fundamental Analysis — type a ticker, get DCF / multiples / scores / financials."""
+"""Fundamental Analysis — ticker → verdict, DCF / multiples / scores / financials / news."""
 import pandas as pd
 import streamlit as st
 
 import fundamentals_core as fc
+import news_core as nc
 import i18n
 import theme
 
@@ -17,16 +18,33 @@ theme.apply()   # renders the global LANGUAGE / ภาษา toggle in the sideb
 
 T = i18n.t
 
+# Cohesive terminal palette (good / bad / accent) used for every chart + badge.
+GOOD, BAD, AMBER, VAL, DIM, INK = "#33FF66", "#FF3B30", "#FF7A00", "#FFB000", "#8A8A8A", "#E6E6E6"
+_PLOTLY = dict(paper_bgcolor="#000000", plot_bgcolor="#050505",
+               font=dict(color=VAL, family="Consolas, monospace"))
+
+
+def _alert(color, text):
+    """Render a colored status box from a verdict color code (good/bad/warn)."""
+    (st.success if color == "good" else st.error if color == "bad" else st.warning)(text)
+
+
 st.title(T("fundamental_title"))
 
-ticker = st.text_input(T("enter_ticker"), value="NVDA").strip().upper()
-disc_pct = st.slider(T("discount_rate") + " (WACC override, %)", 5.0, 20.0, 9.7, 0.1)
+ic1, ic2 = st.columns([3, 1])
+ticker = ic1.text_input(T("enter_ticker"), value="NVDA").strip().upper()
+disc_pct = ic2.slider(T("discount_rate") + " (WACC %)", 5.0, 20.0, 9.7, 0.1)
 go_btn = st.button(T("analyze"), type="primary")
 
 
 @st.cache_data(ttl=900, show_spinner="Loading fundamentals…")
 def _load(sym, disc):
     return fc.analyze(sym, discount_override=disc / 100.0)
+
+
+@st.cache_data(ttl=600, show_spinner="Fetching stock news…")
+def _stock_news(sym):
+    return nc.get_equity_news(sym, limit=30)
 
 
 if not ticker:
@@ -72,9 +90,44 @@ q[3].metric(T("low"), money(res.get("low")))
 q[4].metric(T("volume"), f"{res.get('volume'):,.0f}" if res.get("volume") else "—")
 q[5].metric(T("market_cap"), big(res.get("market_cap")))
 
+# ── VERDICT banner (the headline read) ──────────────────────────────────────────
+st.divider()
+v = fc.verdict(res)
+if v:
+    st.markdown("### Verdict")
+    ov, val, hp = v["overall"], v["valuation"], v["health"]
+    vc = st.columns(3)
+    vc[0].metric("Overall read", ov["label"], f"{ov['score']}/100", delta_color="off")
+    vc[1].metric("Valuation", val["label"],
+                 f"{val['upside']:+.0f}% to fair value" if val.get("upside") is not None else None)
+    vc[2].metric("Financial health", hp["label"],
+                 f"{hp['score']}/100" if hp.get("score") is not None else None, delta_color="off")
+    st.progress(min(max(ov["score"] / 100.0, 0.0), 1.0),
+                text=f"Overall score {ov['score']}/100 — {ov['label']}")
+    _alert(ov["color"], ov["summary"])
+    gcol, rcol = st.columns(2)
+    with gcol:
+        st.markdown("####  Strengths")
+        if v["strengths"]:
+            for s in v["strengths"]:
+                st.markdown(f"- {s}")
+        else:
+            st.caption("No standout strengths detected.")
+    with rcol:
+        st.markdown("####  Risks / red flags")
+        if v["risks"]:
+            for r in v["risks"]:
+                st.markdown(f"- {r}")
+        else:
+            st.caption("No major red flags detected.")
+    st.caption("Heuristic read from the data below — not investment advice. "
+               "Thresholds are sector-agnostic; always sanity-check vs peers.")
+
+st.divider()
+
 tabs = st.tabs([T("summary"), T("dcf_valuation"), T("relative_valuation"),
                 T("wallst_estimates"), T("profitability"), T("solvency"),
-                T("financials"), T("dividends"), T("discount_rate")])
+                T("financials"), T("dividends"), T("discount_rate"), "News"])
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 with tabs[0]:
@@ -114,10 +167,8 @@ with tabs[1]:
             y=[d.get("bear", {}).get("per_share") if d.get("bear") else None,
                base["per_share"],
                d.get("bull", {}).get("per_share") if d.get("bull") else None, price],
-            marker_color=["#EA3943", "#3B82F6", "#16C784", "#8A94A6"]))
-        fig.update_layout(height=340, paper_bgcolor="#000", plot_bgcolor="#050505",
-                          font=dict(color="#FFB000", family="Consolas, monospace"),
-                          title=T("dcf_value_share"))
+            marker_color=[BAD, AMBER, GOOD, DIM]))
+        fig.update_layout(height=340, title=T("dcf_value_share"), **_PLOTLY)
         st.plotly_chart(fig, use_container_width=True)
     if base:
         st.markdown("**" + T("summary") + "**")
@@ -132,9 +183,11 @@ with tabs[1]:
 with tabs[2]:
     st.subheader(T("relative_valuation"))
     m = res.get("multiples", {})
-    rows = [{"Multiple": k, "Value": (f"{v:,.2f}" if isinstance(v, (int, float)) else "—")}
-            for k, v in m.items()]
+    rows = [{"Multiple": k, "Value": (f"{vv:,.2f}" if isinstance(vv, (int, float)) else "—")}
+            for k, vv in m.items()]
     st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+    st.caption("Lower P/E, P/S, EV/EBITDA and PEG generally = cheaper; compare to "
+               "the company's own history and its sector peers.")
 
 # ── Wall St ───────────────────────────────────────────────────────────────────
 with tabs[3]:
@@ -144,10 +197,10 @@ with tabs[3]:
     c = st.columns(3)
 
     def tgt(col, key, label):
-        v = tg.get(key)
-        col.metric(label, money(v))
-        if v and price:
-            diff = (v - price) / price * 100
+        vv = tg.get(key)
+        col.metric(label, money(vv))
+        if vv and price:
+            diff = (vv - price) / price * 100
             col.caption(f"{'+' if diff>=0 else ''}{diff:,.0f}% vs price")
     tgt(c[0], "low", T("low_target"))
     tgt(c[1], "mean", T("mean_target"))
@@ -157,18 +210,17 @@ with tabs[3]:
     if _HAS_PLOTLY and tg.get("low") and tg.get("high") and price:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=[tg["low"], tg["high"]], y=[0, 0], mode="lines",
-                                 line=dict(color="#3B82F6", width=6), name="range"))
-        for v, n, color in ((tg["low"], T("low_target"), "#EA3943"),
-                            (tg["mean"], T("mean_target"), "#3B82F6"),
-                            (tg["high"], T("high_target"), "#16C784"),
-                            (price, T("price"), "#FFB000")):
-            if v:
-                fig.add_trace(go.Scatter(x=[v], y=[0], mode="markers+text", text=[n],
+                                 line=dict(color=AMBER, width=6), name="range"))
+        for vv, n, color in ((tg["low"], T("low_target"), BAD),
+                             (tg["mean"], T("mean_target"), AMBER),
+                             (tg["high"], T("high_target"), GOOD),
+                             (price, T("price"), INK)):
+            if vv:
+                fig.add_trace(go.Scatter(x=[vv], y=[0], mode="markers+text", text=[n],
                                          textposition="top center", marker=dict(size=12, color=color),
                                          showlegend=False))
-        fig.update_layout(height=240, paper_bgcolor="#000", plot_bgcolor="#050505",
-                          font=dict(color="#FFB000", family="Consolas, monospace"),
-                          yaxis=dict(visible=False), title=T("analyst_targets"))
+        fig.update_layout(height=240, yaxis=dict(visible=False),
+                          title=T("analyst_targets"), **_PLOTLY)
         st.plotly_chart(fig, use_container_width=True)
 
 # ── Profitability ─────────────────────────────────────────────────────────────
@@ -184,6 +236,14 @@ with tabs[4]:
     c2[1].metric("ROA", pct(p.get("roa")))
     c2[2].metric("ROIC", pct(p.get("roic")))
     c2[3].metric("ROCE", pct(p.get("roce")))
+    wacc = (res.get("capm") or {}).get("wacc")
+    if p.get("roic") is not None and wacc:
+        if p["roic"] > wacc:
+            st.success(f"ROIC {pct(p['roic'])} exceeds WACC {pct(wacc)} — the business "
+                       "earns more than its cost of capital (value creation).")
+        else:
+            st.error(f"ROIC {pct(p['roic'])} is below WACC {pct(wacc)} — returns don't "
+                     "cover the cost of capital (value destruction).")
 
 # ── Solvency ──────────────────────────────────────────────────────────────────
 with tabs[5]:
@@ -193,6 +253,8 @@ with tabs[5]:
         c = st.columns(2)
         c[0].metric(T("altman_z"), f"{z['z']:,.2f}")
         c[1].metric(T("bankruptcy"), z["zone"])
+        _alert("good" if z["zone"] == "Safe" else "bad" if z["zone"] == "Distress" else "warn",
+               f"Altman Z-Score {z['z']:.2f} → **{z['zone']}** zone.")
         comp = pd.DataFrame([
             {"Component": "X1 liquidity (WC/TA)", "Value": f"{z['x1']:.3f}"},
             {"Component": "X2 retained earnings/TA", "Value": f"{z['x2']:.3f}"},
@@ -216,13 +278,11 @@ with tabs[6]:
             yrs = [str(c)[:10] for c in rev.index][::-1]
             fig = go.Figure()
             fig.add_bar(x=yrs, y=[rev.get(c) for c in rev.index][::-1],
-                        name="Revenue", marker_color="#3B82F6")
+                        name="Revenue", marker_color=AMBER)
             if ni is not None:
                 fig.add_bar(x=yrs, y=[ni.get(c) for c in ni.index][::-1],
-                            name="Net income", marker_color="#16C784")
-            fig.update_layout(height=360, barmode="group", paper_bgcolor="#000",
-                              plot_bgcolor="#050505", font=dict(color="#FFB000",
-                              family="Consolas, monospace"), title=T("revenue_income"))
+                            name="Net income", marker_color=GOOD)
+            fig.update_layout(height=360, barmode="group", title=T("revenue_income"), **_PLOTLY)
             st.plotly_chart(fig, use_container_width=True)
     for label, df in ((T("income_statement"), res.get("income_stmt")),
                       (T("balance_sheet"), res.get("balance_sheet")),
@@ -263,5 +323,43 @@ with tabs[8]:
     ])
     st.dataframe(detail, hide_index=True, width='stretch')
     st.caption("CoE = risk-free + beta × ERP.  WACC = E/(E+D)·CoE + D/(E+D)·Kd·(1−tax).")
+
+# ── News (stock-specific, impact-highlighted) ──────────────────────────────────
+with tabs[9]:
+    st.subheader(f"News on {res['symbol']} — impact highlighted")
+    items = _stock_news(ticker)
+    if not items:
+        st.info("No recent headlines found for this ticker (Yahoo feed best-effort).")
+    else:
+        s = nc.equity_news_summary(items)
+        _alert(s["color"],
+               f"Recent news skews **{s['tone']}** "
+               f"(net score {s['score']:+.1f} · {s['n_high']} high-impact of {s['n']} items). "
+               "Good news ↑ tends to support the price; bad news ↓ pressures it.")
+
+        highs = [it for it in items if it["impact"] == "HIGH"]
+        if highs:
+            with st.container(border=True):
+                st.markdown("**Most important — HIGH impact**")
+                for it in highs[:6]:
+                    mark = {"good": "[+ GOOD]", "bad": "[- BAD ]"}.get(it["sentiment"], "[ NEUT ]")
+                    age = f"{it['age_min']/60:.0f}h ago" if it.get("age_min") and it["age_min"] >= 60 \
+                        else (f"{it['age_min']:.0f}m ago" if it.get("age_min") is not None else "")
+                    title = f"[{it['title']}]({it['link']})" if it.get("link") else it["title"]
+                    line = f"`{mark}` {title}  ·  *{it['source']}*  ·  {age}"
+                    (st.success if it["sentiment"] == "good"
+                     else st.error if it["sentiment"] == "bad" else st.info)(line)
+
+        st.markdown("#### All headlines")
+        for it in items:
+            sent = it["sentiment"]
+            mark = {"good": "[+]", "bad": "[-]"}.get(sent, "[ ]")
+            tag = it["impact"]
+            age = f"{it['age_min']/60:.0f}h" if it.get("age_min") and it["age_min"] >= 60 \
+                else (f"{it['age_min']:.0f}m" if it.get("age_min") is not None else "—")
+            title = f"[{it['title']}]({it['link']})" if it.get("link") else it["title"]
+            st.markdown(f"`{tag:<6}` {mark} {title}  \n  *{it['source']}* · {age}")
+    st.caption("Headlines via Yahoo (best-effort). Good/bad and impact are a keyword "
+               "heuristic — read the article before acting.")
 
 st.caption(T("not_advice"))
