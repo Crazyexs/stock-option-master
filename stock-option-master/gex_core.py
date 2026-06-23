@@ -56,6 +56,7 @@ HONEST LIMITATIONS (read before risking money)
 from __future__ import annotations
 
 import math
+import time
 from datetime import date as _date, datetime as _datetime
 
 import requests
@@ -126,9 +127,22 @@ def bs_gamma(S: float, K: float, T: float, sigma: float,
 def fetch_cboe_raw(sym: str, is_index: bool) -> dict:
     prefix = "_" if is_index else ""
     url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{prefix}{sym}.json"
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    # The CBOE CDN occasionally returns a 5xx / empty body for a few seconds
+    # (most often right at the open). Retry a couple of times before failing so a
+    # momentary hiccup doesn't blank the whole panel.
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("data", {}).get("options"):
+                return data
+            last_exc = ValueError("CBOE returned an empty option chain")
+        except Exception as exc:
+            last_exc = exc
+        time.sleep(0.6 * (attempt + 1))
+    raise last_exc if last_exc else RuntimeError("CBOE fetch failed")
 
 
 def parse_chain(opts: list, spot_raw: float, scale: float,
@@ -550,9 +564,20 @@ def compute_symbol(fut_sym: str, now: _datetime | None = None) -> dict:
         if not opts:
             return {"symbol": fut_sym, "error": "No options from CBOE"}
 
-        df = parse_chain(opts, spot_r, scale, strike_range=0.10, q=q)
+        # Day trading wants a tight ±10% window, but if a thin / briefly-stale
+        # CBOE snapshot yields nothing there, widen progressively before giving
+        # up — a populated panel beats a blank one when the chain clearly has
+        # options. The wall search keys off call/put $gamma magnitude, so the
+        # extra far-OTM strikes (only pulled in as a fallback) don't distort it.
+        df = pd.DataFrame()
+        for _sr in (0.10, 0.20, 0.40):
+            df = parse_chain(opts, spot_r, scale, strike_range=_sr, q=q)
+            if not df.empty:
+                break
         if df.empty:
-            return {"symbol": fut_sym, "error": "No valid strikes after filter"}
+            return {"symbol": fut_sym,
+                    "error": "No valid strikes after filter — CBOE snapshot looks "
+                             "momentarily empty; hit Refresh in a few seconds."}
 
         df_dt, exp_used, dte = _pick_daytrade_expiry(df)
         if df_dt.empty:

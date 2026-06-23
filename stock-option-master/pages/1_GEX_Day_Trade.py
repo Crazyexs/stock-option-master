@@ -180,6 +180,18 @@ def _render_all():
         st.error(f"Failed to load GEX data: {exc}")
         return
 
+    # A transient CBOE hiccup (common in the first seconds after the open) can
+    # blank all three symbols. Don't let that failure sit in the 120s cache —
+    # clear it so the next rerun / Refresh re-fetches instead of serving the
+    # stale error.
+    if results and all(isinstance(v, dict) and v.get("error") for v in results.values()):
+        _load.clear()
+        st.warning(
+            "CBOE returned no usable data on that pull — usually a brief feed "
+            "hiccup right after the open. The cache was cleared; click "
+            "**Refresh data** (or wait a few seconds and rerun)."
+        )
+
     # Passive time-series: append a snapshot at most once per minute so the Wall
     # Migration page builds history without the user clicking anything.
     try:

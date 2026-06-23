@@ -101,9 +101,21 @@ def _bs_gamma_gex(S: float, K: float, T: float, sigma: float,
 def _fetch_cboe_gex_raw(sym: str, is_index: bool) -> dict:
     prefix = "_" if is_index else ""
     url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{prefix}{sym}.json"
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    # Retry a couple of times — the CBOE CDN can return a transient 5xx / empty
+    # body for a few seconds (most often right at the open).
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("data", {}).get("options"):
+                return data
+            last_exc = ValueError("CBOE returned an empty option chain")
+        except Exception as exc:
+            last_exc = exc
+        time.sleep(0.6 * (attempt + 1))
+    raise last_exc if last_exc else RuntimeError("CBOE fetch failed")
 
 
 def _parse_options_gex(opts: list, spot_raw: float, scale: float,
@@ -392,10 +404,18 @@ def compute_futures_gex(mode: str = "swing") -> dict:
             # OTM strikes contribute negligible γ at <5 DTE and only add
             # noise to the wall search.
             strike_range = 0.10 if mode == "daytrade" else 0.20
-            df = _parse_options_gex(opts, spot_r, scale, q=q_div,
-                                    strike_range=strike_range)
+            # Widen the strike window if a thin / briefly-stale CBOE snapshot
+            # yields nothing at the preferred range, so a momentary hiccup
+            # doesn't blank the instrument.
+            df = pd.DataFrame()
+            for _sr in (strike_range, 0.30, 0.50):
+                df = _parse_options_gex(opts, spot_r, scale, q=q_div,
+                                        strike_range=_sr)
+                if not df.empty:
+                    break
             if df.empty:
-                results[fut_sym] = {"error": "No valid options after strike filter"}
+                results[fut_sym] = {"error": "No valid options after strike filter "
+                                             "(CBOE snapshot may be momentarily empty — retry)"}
                 continue
 
             exps_all = sorted(df["exp"].unique())
