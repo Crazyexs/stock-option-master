@@ -142,11 +142,15 @@ def analyze(symbol: str, erp: float = 0.045, discount_override: float | None = N
         net_debt = total_debt - total_cash
         beta = _f(info.get("beta")) or 1.0
 
-        # Free cash flow (info first, else OCF - CapEx).
+        # Free cash flow (info first, else a "Free Cash Flow" row, else OCF - CapEx).
         fcf = _f(info.get("freeCashflow"))
         if not fcf:
-            ocf = _latest(cash, "Operating Cash Flow", "Total Cash From Operating Activities")
-            capex = _latest(cash, "Capital Expenditure", "Capital Expenditures")
+            fcf = _latest(cash, "Free Cash Flow")
+        if not fcf:
+            ocf = _latest(cash, "Operating Cash Flow", "Total Cash From Operating Activities",
+                          "Cash Flow From Continuing Operating Activities")
+            capex = _latest(cash, "Capital Expenditure", "Capital Expenditures",
+                            "Purchase Of PPE")
             if ocf is not None and capex is not None:
                 fcf = ocf - abs(capex)
 
@@ -201,7 +205,8 @@ def analyze(symbol: str, erp: float = 0.045, discount_override: float | None = N
         ta = _latest(balance, "Total Assets")
         cl = _latest(balance, "Current Liabilities", "Total Current Liabilities")
         equity_bv = _latest(balance, "Stockholders Equity", "Total Stockholder Equity")
-        prof["roic"] = (ebit * (1 - tax) / (total_debt + equity_bv)) if (ebit and (total_debt + (equity_bv or 0))) else None
+        invested_capital = total_debt + (equity_bv or 0.0)
+        prof["roic"] = (ebit * (1 - tax) / invested_capital) if (ebit and invested_capital) else None
         prof["roce"] = (ebit / (ta - cl)) if (ebit and ta and cl is not None and (ta - cl)) else None
 
         z = altman_z(balance, income, mcap)

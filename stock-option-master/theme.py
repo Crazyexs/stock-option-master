@@ -43,7 +43,9 @@ html, body, [class*="css"], .stApp, [data-testid="stAppViewContainer"] {
     font-family:'Consolas','Courier New',monospace !important;
 }
 [data-testid="stHeader"] { background:#000000 !important; border-bottom:1px solid #FF7A00; }
-.block-container { padding-top:1rem !important; padding-bottom:2rem !important; }
+/* Clear Streamlit's fixed top header (~3.75rem) so the live ticker tape —
+   the first element in the container — isn't hidden behind it. */
+.block-container { padding-top:4rem !important; padding-bottom:2rem !important; }
 h1,h2,h3,h4 { color:#FF7A00 !important; font-family:'Consolas',monospace !important;
     letter-spacing:0.5px; text-transform:uppercase; }
 h1 { border-bottom:2px solid #FF7A00; padding-bottom:4px; }
