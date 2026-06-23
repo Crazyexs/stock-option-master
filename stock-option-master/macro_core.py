@@ -41,6 +41,7 @@ HONEST LIMITATIONS
 from __future__ import annotations
 
 import math
+import re
 from datetime import date as _date, datetime as _datetime, timedelta
 
 import numpy as np
@@ -78,8 +79,18 @@ def _first_friday(y: int, m: int) -> _date:
     return d + timedelta(days=(4 - d.weekday()) % 7)   # Mon=0 … Fri=4
 
 
-def next_events(today: _date | None = None, n: int = 5) -> list[tuple]:
-    """Upcoming high-impact US events: FOMC decisions + NFP (first Friday)."""
+def next_events(today: _date | None = None, n: int = 5,
+                include_live: bool = True) -> list[tuple]:
+    """
+    Upcoming high-impact US events.
+
+    Baseline is always the static FOMC + NFP computation (guaranteed, offline).
+    When `include_live` is set we ALSO merge the live Nasdaq economic calendar
+    (CPI / PCE / PPI / GDP / ISM / retail sales …) via econ_calendar_core — a
+    best-effort enrichment that degrades silently to the static list if the feed
+    is unreachable. Dedupes on (date, event) so a live "FOMC" doesn't double the
+    static one.
+    """
     today = today or _date.today()
     evs: list[tuple] = []
     for d in FOMC_2026:
@@ -94,14 +105,37 @@ def next_events(today: _date | None = None, n: int = 5) -> list[tuple]:
         ff = _first_friday(y, m)
         if ff >= today:
             evs.append((ff, "Nonfarm Payrolls (NFP)", "high"))
-    evs.sort(key=lambda x: x[0])
-    return evs[:n]
+
+    if include_live:
+        try:
+            import econ_calendar_core as ec
+            for e in ec.upcoming_us_events(days=max(10, n * 2), today=today,
+                                           min_impact="HIGH"):
+                evs.append((_parse(e["date"]), e["event"], "high"))
+        except Exception:
+            pass
+
+    # Dedupe: one event per (date, lowercased name), keep stable sort by date.
+    seen, deduped = set(), []
+    for dd, name, imp in sorted(evs, key=lambda x: x[0]):
+        key = (dd, re.sub(r"[^a-z]", "", name.lower())[:24])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((dd, name, imp))
+    return deduped[:n]
 
 
-def event_risk(today: _date | None = None) -> dict:
-    """Proximity of the next high-impact event, with a tradeability flag."""
+def event_risk(today: _date | None = None, include_live: bool = True) -> dict:
+    """
+    Proximity of the next high-impact event, with a tradeability flag.
+
+    `include_live` merges the live Nasdaq calendar (CPI/PCE/PPI/…). The NQ model
+    passes include_live=False so its hot path stays fast and offline-safe; the
+    Macro News page leaves it on (and caches the result).
+    """
     today = today or _date.today()
-    ev = next_events(today, 6)
+    ev = next_events(today, 6, include_live=include_live)
     if not ev:
         return {"flag": "clear", "days": None, "event": None, "upcoming": []}
     nxt = ev[0]
@@ -216,7 +250,7 @@ def compute_nq_bias(period: str = "6mo") -> dict:
         out["errors"].append("No cross-asset data (yfinance).")
     tilt = cross_asset_tilt(returns)
     corr = correlation_matrix(returns)
-    ev = event_risk()
+    ev = event_risk(include_live=False)   # keep the model's hot path fast/offline
     news = news_pulse()
     try:
         gex = gx.compute_symbol("NQ")
@@ -296,8 +330,8 @@ def news_pulse() -> dict:
     """
     try:
         import news_core as nc
-        # FinancialJuice only — fast + reliable. The model must not block on the
-        # flaky Nitter retry loop (that feed lives on the Macro News page).
+        # FinancialJuice only here — one fast, reliable feed keeps this model read
+        # snappy; the full multi-source squawk lives on the Macro News page.
         items = nc.get_headlines(sources=["FinancialJuice"], min_impact="LOW", limit=60)
         return nc.market_impact_summary(items)
     except Exception:

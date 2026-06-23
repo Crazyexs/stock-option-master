@@ -3,11 +3,12 @@ news_core.py — live market headlines with a market-IMPACT classifier.
 ================================================================================
 Pure-logic module (no Streamlit side effects). It does three things:
 
-1.  FETCH headlines from fast, trader-grade sources:
+1.  FETCH headlines from fast, trader-grade sources (all free, native RSS — no
+    API key, no scraping, no Twitter/Nitter dependency):
       • FinancialJuice   — real-time macro/geopolitics squawk (RSS).
-      • Walter Bloomberg  (@DeItaone on X) — the fastest English-language relay
-        of Bloomberg terminal headlines, via a Nitter RSS mirror (best-effort:
-        Nitter instances come and go, so several are tried in turn).
+      • ForexLive        — real-time macro / central-bank / data squawk; the
+        closest free stand-in for the old Walter Bloomberg (@DeItaone) relay.
+      • Investing.com    — economy headlines (rates, inflation, jobs, GDP).
       • yfinance ticker news — per-symbol fallback so the page is never empty.
 
 2.  RATE each headline's likely MARKET IMPACT — HIGH / MEDIUM / LOW — from a
@@ -31,10 +32,14 @@ highest. Tune the maps; the thresholds are deliberately conservative.
 HONEST LIMITATIONS
 ------------------
 * Impact is a heuristic *prior*, not a realised move — confirm against price.
-* Nitter mirrors are unofficial and frequently rate-limit or 404; if every
-  instance is down, the Walter Bloomberg feed is simply skipped (the others
-  still render). For a guaranteed feed, wire the official X API with a bearer
-  token via `fetch_x_user(...)`.
+* The old Walter Bloomberg (@DeItaone) feed was pulled via Nitter, which is now
+  defunct (X killed the guest API; public instances 404 / rate-limit / demand
+  per-reader whitelisting). It has been replaced by free, native-RSS squawk
+  sources (ForexLive + Investing.com) that carry the same macro/data flow. If
+  you specifically need @DeItaone, wire the official X API via `fetch_x_user(...)`
+  (kept below) with a paid bearer token.
+* Every fetcher is best-effort and never raises; a dead source is simply
+  skipped and the others still render.
 * Headline tone (risk-on/off) is a bag-of-words guess; it cannot read sarcasm,
   negation, or "less bad than feared".
 """
@@ -48,25 +53,29 @@ from xml.etree import ElementTree as ET
 
 import requests
 
-_UA = {"User-Agent": "Mozilla/5.0 (compatible; GEXTerminal/1.0)"}
+# A browser-like UA: some news CDNs 403 a bare/library UA.
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                     "AppleWebKit/537.36 (KHTML, like Gecko) "
+                     "Chrome/124.0 Safari/537.36"}
 _TIMEOUT = 12
-_NITTER_TIMEOUT = 6     # mirrors are flaky — fail fast and move to the next one
 
-# ── Sources ───────────────────────────────────────────────────────────────────
+# ── Sources (all free, native RSS — no API key, no Twitter/Nitter) ─────────────
+# Each entry: display name -> RSS URL. The display names are what the UI shows in
+# its source picker and what `get_headlines(sources=[...])` accepts.
 FINANCIALJUICE_RSS = "https://www.financialjuice.com/feed.ashx?xy=rss"
+FOREXLIVE_RSS      = "https://www.forexlive.com/feed/news"
+INVESTING_ECON_RSS = "https://www.investing.com/rss/news_285.rss"
 
-# Walter Bloomberg = @DeItaone. X has no public RSS, so we mirror through Nitter.
-# Instances rotate often; the first that returns valid XML wins.
+_RSS_SOURCES: dict[str, str] = {
+    "FinancialJuice": FINANCIALJUICE_RSS,
+    "ForexLive":      FOREXLIVE_RSS,
+    "Investing.com":  INVESTING_ECON_RSS,
+}
+
+SOURCES = tuple(_RSS_SOURCES)   # ("FinancialJuice", "ForexLive", "Investing.com")
+
+# Kept for the optional official-X-API path (see fetch_x_user); not used by default.
 WALTER_BLOOMBERG_HANDLE = "DeItaone"
-_NITTER_INSTANCES = (
-    "https://nitter.net",
-    "https://nitter.poast.org",
-    "https://nitter.privacydev.net",
-    "https://nitter.cz",
-    "https://nitter.1d4.us",
-)
-
-SOURCES = ("FinancialJuice", "Walter Bloomberg")
 
 
 # ── Market-impact keyword model ───────────────────────────────────────────────
@@ -297,35 +306,35 @@ def parse_feed(xml_text: str, source: str) -> list[dict]:
 
 
 # ── Fetchers (best-effort; never raise) ───────────────────────────────────────
-def fetch_financialjuice() -> list[dict]:
+def _fetch_rss(url: str, source: str) -> list[dict]:
+    """GET an RSS/Atom URL and parse it. Returns [] on any failure or non-feed
+    body (e.g. a Cloudflare/HTML interstitial), so junk never reaches the UI."""
     try:
-        r = requests.get(FINANCIALJUICE_RSS, headers=_UA, timeout=_TIMEOUT)
+        r = requests.get(url, headers=_UA, timeout=_TIMEOUT)
         r.raise_for_status()
-        items = parse_feed(r.text, "FinancialJuice")
-        for it in items:                            # drop the "FinancialJuice: " prefix
-            it["title"] = re.sub(r"^FinancialJuice:\s*", "", it["title"])
-        return items
+        head = r.text.lstrip()[:200].lower()
+        # Real feeds start with the XML prolog or a feed root; HTML walls don't.
+        if not (head.startswith("<?xml") or "<rss" in head or "<feed" in head):
+            return []
+        return parse_feed(r.text, source)
     except Exception:
         return []
 
 
-def fetch_walter_bloomberg() -> list[dict]:
-    """Try each Nitter mirror until one returns valid XML; else empty."""
-    for base in _NITTER_INSTANCES:
-        url = f"{base}/{WALTER_BLOOMBERG_HANDLE}/rss"
-        try:
-            r = requests.get(url, headers=_UA, timeout=_NITTER_TIMEOUT)
-            if r.status_code != 200 or "<" not in r.text[:200]:
-                continue
-            items = parse_feed(r.text, "Walter Bloomberg")
-            if items:
-                # Strip Nitter's "RT by @x:" / "R to @x:" relay-noise prefixes.
-                for it in items:
-                    it["title"] = re.sub(r"^(?:RT by|R to) @\w+:\s*", "", it["title"])
-                return items
-        except Exception:
-            continue
-    return []
+def fetch_source(source: str) -> list[dict]:
+    """Fetch one named RSS source from `_RSS_SOURCES`. Unknown name -> []."""
+    url = _RSS_SOURCES.get(source)
+    if not url:
+        return []
+    items = _fetch_rss(url, source)
+    if source == "FinancialJuice":                  # drop the "FinancialJuice: " prefix
+        for it in items:
+            it["title"] = re.sub(r"^FinancialJuice:\s*", "", it["title"])
+    return items
+
+
+def fetch_financialjuice() -> list[dict]:           # back-compat thin wrapper
+    return fetch_source("FinancialJuice")
 
 
 def fetch_x_user(handle: str, bearer_token: str, max_results: int = 25) -> list[dict]:
@@ -412,10 +421,9 @@ def get_headlines(sources: list[str] | None = None,
     """
     sources = sources or list(SOURCES)
     raw: list[dict] = []
-    if "FinancialJuice" in sources:
-        raw += fetch_financialjuice()
-    if "Walter Bloomberg" in sources:
-        raw += fetch_walter_bloomberg()
+    for src in sources:
+        if src in _RSS_SOURCES:
+            raw += fetch_source(src)
     if yf_ticker:
         raw += fetch_yf_ticker_news(yf_ticker)
 

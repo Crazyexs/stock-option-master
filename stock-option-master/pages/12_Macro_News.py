@@ -1,6 +1,6 @@
 """ Macro News — US event calendar (FOMC/NFP) + impact-rated live squawk.
 
-Sources: FinancialJuice + Walter Bloomberg (@DeItaone) real-time headlines, each
+Sources: FinancialJuice + ForexLive + Investing.com real-time headlines, each
 rated HIGH / MEDIUM / LOW market impact, with a HIGH-impact alert banner and an
 impact / source filter. Yahoo per-ticker news is kept as a tertiary feed.
 """
@@ -20,7 +20,15 @@ st.caption("Scheduled events that break gamma pins + impact-rated live squawk. "
 
 # ── Event calendar ────────────────────────────────────────────────────────────
 st.markdown("####  Upcoming high-impact US events")
-ev = mc.event_risk()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _event_risk(_stamp):
+    # Cached so the live calendar merge (Nasdaq HTTP) runs at most every 30 min.
+    return mc.event_risk()
+
+
+ev = _event_risk(date.today().isoformat())
 if ev.get("event"):
     flag = ev["flag"]
     head = f"**Next:** {ev['event']} — {ev['date']} ({ev['days']}d away)"
@@ -33,7 +41,34 @@ if ev.get("event"):
     for d, name in ev.get("upcoming", []):
         days = (mc._parse(d) - date.today()).days
         st.markdown(f"- **{d}** · {name} · {days}d")
-st.caption("FOMC dates are static — verify vs federalreserve.gov; CPI not auto-listed.")
+
+# Live economic calendar (CPI/PCE/PPI/GDP/ISM/retail sales) with consensus/prior.
+@st.cache_data(ttl=1800, show_spinner="Loading economic calendar…")
+def _econ(days, min_impact):
+    import econ_calendar_core as ec
+    return ec.upcoming_us_events(days=days, min_impact=min_impact)
+
+with st.expander("Live US economic calendar (next 10 days)", expanded=True):
+    cc1, cc2 = st.columns([1, 3])
+    with cc1:
+        imp = st.selectbox("Min impact", ["HIGH", "MEDIUM"], index=1, key="econ_imp")
+    try:
+        rows = _econ(10, imp)
+    except Exception:
+        rows = []
+    if not rows:
+        st.info("Live calendar unavailable right now — the static FOMC/NFP list "
+                "above still applies.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame([{
+            "Date": r["date"], "Time(GMT)": r["time"], "Impact": r["impact"],
+            "Event": r["event"], "Consensus": r["consensus"] or "-",
+            "Previous": r["previous"] or "-", "Actual": r["actual"] or "-",
+        } for r in rows])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption(f"{len(rows)} US events · source: Nasdaq economic calendar (live). "
+                   "FOMC/NFP also seeded statically so the list is never empty.")
 
 st.divider()
 
@@ -105,8 +140,7 @@ _IMPACT_TAG = {"HIGH": "[HIGH]", "MEDIUM": "[MED ]", "LOW": "[low ]"}
 
 if not items:
     st.info("No headlines match this filter right now. "
-            "Nitter mirrors (Walter Bloomberg) are often rate-limited — try Refresh "
-            "or rely on FinancialJuice.")
+            "Try a lower impact floor, add more sources, or hit Refresh.")
 else:
     st.caption(f"{len(items)} headlines · newest first · "
                "impact = weighted keyword model (rates / inflation / jobs / geopolitics …)")
@@ -125,6 +159,5 @@ else:
         else:
             st.markdown(line)
 
-st.caption("FinancialJuice via RSS · Walter Bloomberg (@DeItaone) via Nitter mirror "
-           "(best-effort) · Yahoo per-ticker. Impact ratings are a heuristic prior — "
-           "confirm against price at your GEX levels.")
+st.caption("FinancialJuice · ForexLive · Investing.com via RSS · Yahoo per-ticker. "
+           "Impact ratings are a heuristic prior — confirm against price at your GEX levels.")

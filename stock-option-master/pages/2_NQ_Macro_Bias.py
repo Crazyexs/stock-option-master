@@ -69,7 +69,7 @@ if news:
         st.warning(" " + nmsg + "  ·  watch — confidence trimmed.")
     else:
         st.info(" " + nmsg + "  ·  calm.")
-    st.caption("Impact-rated headlines on the  Macro News page (FinancialJuice + Walter Bloomberg).")
+    st.caption("Impact-rated headlines on the  Macro News page (FinancialJuice + ForexLive + Investing.com).")
 
 # ── Headline bias ─────────────────────────────────────────────────────────────
 p_up = res.get("p_up", 50.0)

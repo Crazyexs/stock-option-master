@@ -180,6 +180,16 @@ def _render_all():
         st.error(f"Failed to load GEX data: {exc}")
         return
 
+    # Passive time-series: append a snapshot at most once per minute so the Wall
+    # Migration page builds history without the user clicking anything.
+    try:
+        _mk = _now_et().strftime("%Y-%m-%d %H:%M")
+        if st.session_state.get("_gex_snap_min") != _mk:
+            gx.snapshot_levels(results)
+            st.session_state["_gex_snap_min"] = _mk
+    except Exception:
+        pass
+
     for i, sym in enumerate(("ES", "NQ", "GC")):
         _render_symbol(sym, results.get(sym, {}))
         if i < 2:
