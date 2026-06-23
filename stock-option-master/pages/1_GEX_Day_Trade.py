@@ -36,6 +36,12 @@ def _load(_stamp: str) -> dict:
     return gx.compute_all()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_leadlag(_stamp: str) -> dict:
+    # Lead/lag changes slowly intraday — cache 5 min to spare the Yahoo feed.
+    return gx.lead_lag()
+
+
 def _now_et() -> datetime:
     return datetime.now(_ET) if _ET else datetime.now()
 
@@ -202,10 +208,45 @@ def _render_all():
     except Exception:
         pass
 
-    for i, sym in enumerate(("ES", "NQ", "GC")):
+    syms = ("ES", "NQ", "YM", "GC")
+    for i, sym in enumerate(syms):
         _render_symbol(sym, results.get(sym, {}))
-        if i < 2:
+        if i < len(syms) - 1:
             st.divider()
+
+    # ── Lead / lag — which index is driving and which is following ─────────────
+    st.divider()
+    st.markdown("####  Lead / Lag — who's driving intraday")
+    ll = _load_leadlag(stamp if not auto else _now_et().strftime("%H:%M"))
+    if ll.get("error"):
+        st.info(f"Lead-lag unavailable: {ll['error']}")
+    elif ll.get("contemporaneous"):
+        st.info("All instruments are moving essentially in lockstep right now — "
+                "no measurable lead at this resolution.")
+    else:
+        lc = st.columns(2)
+        lc[0].metric("Leading (moves first)", ll["leader"],
+                     help="Net leader by lagged return cross-correlation — its move "
+                          "tends to show up in the others a few minutes later.")
+        lc[1].metric("Lagging (follows)", ll["laggard"],
+                     help="Net follower — it confirms the move after the leader. "
+                          "Often the cleaner entry once the leader has shown its hand.")
+        rows = []
+        for p in ll["pairs"]:
+            if not p["leader"]:
+                rel = f"{p['a']} and {p['b']} move together (no lead)"
+            else:
+                rel = f"{p['leader']} leads {p['lagger']} by ~{p['lag_min']:.0f} min"
+            rows.append({"Pair": f"{p['a']} / {p['b']}", "Relationship": rel,
+                         "Corr": f"{p['corr']:+.2f}"})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+        st.caption(
+            f"From {ll['n_bars']} bars of {ll['interval']} returns. A positive lag "
+            "means the leader's move precedes the laggard's; negative correlation "
+            "(typically GC vs the equity indices) means they move opposite. "
+            "Intraday leads are small and rotate through the session — treat as a "
+            "lean, not a signal."
+        )
 
     st.divider()
     sc1, sc2 = st.columns([1, 3])

@@ -69,8 +69,8 @@ _DIV_YIELD = {"ES": 0.013, "NQ": 0.007, "GC": 0.0}
 def _fetch_yf_spot(ticker: str) -> float | None:
     """Fetch latest close price from yfinance for a futures contract."""
     try:
-        import yfinance as yf
-        h = yf.Ticker(ticker).history(period="2d")
+        import yf_session as yfs
+        h = yfs.make_ticker(ticker).history(period="2d")
         return float(h["Close"].iloc[-1]) if not h.empty else None
     except Exception:
         return None

@@ -54,8 +54,8 @@ def _latest(df, *names):
 # ── Risk-free rate ────────────────────────────────────────────────────────────
 def _risk_free():
     try:
-        import yfinance as yf
-        h = yf.Ticker("^TNX").history(period="5d")["Close"].dropna()
+        import yf_session as yfs
+        h = yfs.make_ticker("^TNX").history(period="5d")["Close"].dropna()
         if not h.empty:
             return float(h.iloc[-1]) / 100.0
     except Exception:
@@ -116,9 +116,9 @@ def analyze(symbol: str, erp: float = 0.045, discount_override: float | None = N
     if not symbol:
         return {"error": "Enter a ticker symbol."}
     try:
-        import yfinance as yf
+        import yf_session as yfs
         import pandas as pd  # noqa: F401  (ensures pandas present for statements)
-        t = yf.Ticker(symbol)
+        t = yfs.make_ticker(symbol)
         try:
             info = t.info or {}
         except Exception:

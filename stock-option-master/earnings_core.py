@@ -48,8 +48,8 @@ def next_earnings(ticker: str, today: _date | None = None) -> dict | None:
     """
     today = today or _date.today()
     try:
-        import yfinance as yf
-        tk = yf.Ticker(ticker)
+        import yf_session as yfs
+        tk = yfs.make_ticker(ticker)
     except Exception:
         return None
 

@@ -68,8 +68,8 @@ def _fetch_cboe_quote(sym: str) -> float | None:
 
 def _fetch_yf_quote(sym: str) -> float | None:
     try:
-        import yfinance as yf
-        h = yf.Ticker(_YF[sym]).history(period="2d")
+        import yf_session as yfs
+        h = yfs.make_ticker(_YF[sym]).history(period="2d")
         return float(h["Close"].iloc[-1]) if not h.empty else None
     except Exception:
         return None

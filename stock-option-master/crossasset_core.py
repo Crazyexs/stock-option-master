@@ -75,10 +75,10 @@ _SECTORS = {
 def _quote_block(tickers: dict[str, str], is_yield: bool = False) -> list[dict]:
     """(label, last, prev, pct) for a dict of tickers — robust to failures."""
     try:
-        import yfinance as yf
+        import yf_session as yfs
         syms = list(dict.fromkeys(tickers.values()))
-        data = yf.download(syms, period="5d", interval="1d",
-                           progress=False, group_by="ticker", threads=True)
+        data = yfs.download(syms, period="5d", interval="1d",
+                            progress=False, group_by="ticker", threads=False)
     except Exception:
         return []
     out = []

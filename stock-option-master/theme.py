@@ -129,14 +129,19 @@ hr { border-color:#2a1a00 !important; }
 """
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _quotes(tape):
-    """(label, last, pct-change) for the tape universe — best-effort via yfinance."""
+    """(label, last, pct-change) for the tape universe — best-effort via yfinance.
+
+    Cached 5 min: the tape renders on EVERY page (theme.apply), so a short TTL
+    means each navigation re-hits Yahoo for the whole universe and trips the 429
+    rate limit. Routed through the shared browser-impersonating session.
+    """
     try:
-        import yfinance as yf
+        import yf_session as yfs
         tickers = [t for _, t in tape]
-        df = yf.download(tickers, period="2d", interval="1d",
-                         progress=False, group_by="ticker", threads=True)
+        df = yfs.download(tickers, period="2d", interval="1d",
+                          progress=False, group_by="ticker", threads=False)
     except Exception:
         return []
     out = []

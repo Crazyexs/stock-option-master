@@ -74,12 +74,18 @@ except Exception:                                    # pragma: no cover
 _FUTURES_CBOE = {
     "ES": ("SPX", True),    # SPX index options  — same price scale as ES
     "NQ": ("NDX", True),    # NDX index options  — same price scale as NQ
+    "YM": ("DJX", True),    # DJX index options  — DJIA/100, scaled ×100 to YM
     "GC": ("GLD", False),   # GLD ETF options    — scaled up to GC equivalent
 }
-_YF_FUTURES = {"ES": "ES=F", "NQ": "NQ=F", "GC": "GC=F"}
+_YF_FUTURES = {"ES": "ES=F", "NQ": "NQ=F", "YM": "YM=F", "GC": "GC=F"}
+
+# CBOE proxies that are a *fraction* of the futures price level, so strikes must
+# be scaled up to the futures scale. Value = fallback multiplier if the live
+# yfinance ratio is unavailable (DJX≈DJIA/100 → ×100, GLD≈gold/10 → ×10).
+_SCALED = {"YM": 100.0, "GC": 10.0}
 
 # Continuous dividend yield used in the Merton gamma / zero-gamma root finder.
-_DIV_YIELD = {"ES": 0.013, "NQ": 0.007, "GC": 0.0}
+_DIV_YIELD = {"ES": 0.013, "NQ": 0.007, "YM": 0.018, "GC": 0.0}
 
 # Risk-free rate (only enters d1; intraday sensitivity is negligible).
 _RISK_FREE = 0.05
@@ -98,8 +104,8 @@ _SESSION_MIN = 390.0
 def fetch_yf_spot(ticker: str) -> float | None:
     """Latest futures price from yfinance (used as the live anchor + GC scale)."""
     try:
-        import yfinance as yf
-        h = yf.Ticker(ticker).history(period="2d")
+        import yf_session as yfs
+        h = yfs.make_ticker(ticker).history(period="2d")
         return float(h["Close"].iloc[-1]) if not h.empty else None
     except Exception:
         return None
@@ -550,13 +556,14 @@ def compute_symbol(fut_sym: str, now: _datetime | None = None) -> dict:
         if not spot_r:
             return {"symbol": fut_sym, "error": "No spot from CBOE"}
 
-        if fut_sym == "GC":
-            gc = fetch_yf_spot(_YF_FUTURES["GC"])
-            scale = (gc / spot_r) if (gc and spot_r > 0) else 10.0
-            spot = round(gc or spot_r * scale, 2)
+        yf_px = fetch_yf_spot(_YF_FUTURES[fut_sym])
+        if fut_sym in _SCALED:
+            # CBOE proxy is a fraction of the futures level (DJX, GLD): derive the
+            # live multiplier from the futures price, fall back to the static ratio.
+            scale = (yf_px / spot_r) if (yf_px and spot_r > 0) else _SCALED[fut_sym]
+            spot = round(yf_px or spot_r * scale, 2)
         else:
-            yf = fetch_yf_spot(_YF_FUTURES[fut_sym])
-            spot = round(yf or spot_r, 2)
+            spot = round(yf_px or spot_r, 2)
             scale = 1.0
 
         q = _DIV_YIELD.get(fut_sym, 0.0)
@@ -665,7 +672,7 @@ def pipe_string(results: dict) -> str:
         ("secondary_put_wall", "Put Wall 2"),
     ]
     parts = []
-    for sym in ("ES", "NQ", "GC"):
+    for sym in _FUTURES_CBOE:
         d = results.get(sym, {})
         if d.get("error"):
             continue
@@ -674,6 +681,96 @@ def pipe_string(results: dict) -> str:
             if v is not None:
                 parts.append(f"{sym}:{v:.0f}:{label}")
     return "|".join(parts)
+
+
+# ── Lead / lag — which instrument is driving intraday ─────────────────────────
+_LEADLAG = {"ES": "ES=F", "NQ": "NQ=F", "YM": "YM=F", "GC": "GC=F"}
+
+
+def _interval_minutes(interval: str) -> int:
+    s = (interval or "").strip().lower()
+    try:
+        if s.endswith("m"):
+            return max(int(s[:-1] or 1), 1)
+        if s.endswith("h"):
+            return max(int(s[:-1] or 1), 1) * 60
+        if s.endswith("d"):
+            return max(int(s[:-1] or 1), 1) * 1440
+    except Exception:
+        pass
+    return 5
+
+
+def lead_lag(period: str = "5d", interval: str = "5m", max_lag: int = 6) -> dict:
+    """
+    Intraday lead/lag across ES, NQ, YM, GC via lagged return cross-correlation.
+
+    For each pair we scan lags k ∈ [−max_lag, +max_lag] bars and keep the lag with
+    the strongest |corr| between a_t and b_{t+k}. k>0 means A's move shows up in B
+    k bars LATER → **A leads B** (B lags). Per-asset net lead = (bars it leads
+    others) − (bars it lags others); the top is the leader, the bottom the
+    laggard. Correlation sign is reported too — GC usually moves opposite the
+    equity indices, so a negative corr there is expected and still informative.
+    """
+    try:
+        import numpy as np
+        import yf_session as yfs
+        raw = yfs.download(list(_LEADLAG.values()), period=period, interval=interval,
+                           progress=False, group_by="ticker", threads=False)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    closes = {}
+    for sym, tk in _LEADLAG.items():
+        try:
+            s = raw[tk]["Close"].dropna()
+            if len(s) > 30:
+                closes[sym] = s
+        except Exception:
+            continue
+    if len(closes) < 2:
+        return {"error": "not enough intraday data (Yahoo may be rate-limited)"}
+
+    px = pd.DataFrame(closes).dropna()
+    rets = np.log(px / px.shift(1)).dropna()
+    if len(rets) < 30:
+        return {"error": "not enough overlapping bars"}
+
+    syms = list(rets.columns)
+    bar_min = _interval_minutes(interval)
+    pairs: list[dict] = []
+    net = {s: 0 for s in syms}
+    leads = {s: 0 for s in syms}
+    for i in range(len(syms)):
+        for j in range(i + 1, len(syms)):
+            a, b = syms[i], syms[j]
+            best_k, best_c = 0, 0.0
+            for k in range(-max_lag, max_lag + 1):
+                c = rets[a].corr(rets[b].shift(-k))
+                if c is not None and not np.isnan(c) and abs(c) > abs(best_c):
+                    best_c, best_k = c, k
+            if best_k > 0:
+                leader, lagger, lag = a, b, best_k
+            elif best_k < 0:
+                leader, lagger, lag = b, a, -best_k
+            else:
+                leader, lagger, lag = None, None, 0
+            pairs.append({"a": a, "b": b, "leader": leader, "lagger": lagger,
+                          "lag_bars": lag, "lag_min": lag * bar_min,
+                          "corr": round(float(best_c), 3)})
+            if leader:
+                net[leader] += lag
+                net[lagger] -= lag
+                leads[leader] += 1
+
+    ranking = sorted(syms, key=lambda s: (net[s], leads[s]), reverse=True)
+    contemporaneous = all(p["lag_bars"] == 0 for p in pairs)
+    return {
+        "pairs": pairs, "ranking": ranking,
+        "leader": ranking[0], "laggard": ranking[-1],
+        "net": net, "leads": leads, "contemporaneous": contemporaneous,
+        "bar_min": bar_min, "interval": interval, "n_bars": int(len(rets)),
+    }
 
 
 # ── Snapshot logger (foundation for backtesting which levels actually pay) ─────
